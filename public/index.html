@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Google Image Scraper — Find Image Links</title>
+    <meta
+      name="description"
+      content="Search Google Images and extract direct image URLs instantly."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Header / Hero -->
+      <header class="hero">
+        <div class="hero-glow"></div>
+        <div class="logo">
+          <svg
+            class="logo-icon"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <h1>Image<span class="accent">Scraper</span></h1>
+        </div>
+        <p class="subtitle">
+          Search Google Images &amp; extract direct image URLs instantly
+        </p>
+
+        <!-- Search Bar -->
+        <form class="search-bar" id="searchForm">
+          <div class="search-input-wrapper">
+            <svg
+              class="search-icon"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <line x1="21" y1="21" x2="16.65" y2="16.65" />
+            </svg>
+            <input
+              type="text"
+              id="queryInput"
+              class="search-input"
+              placeholder="Search for images... e.g. sunset mountains"
+              autocomplete="off"
+              required
+            />
+            <div class="count-wrapper">
+              <label for="countInput" class="count-label">Max:</label>
+              <input
+                type="number"
+                id="countInput"
+                class="count-input"
+                value="20"
+                min="1"
+                max="50"
+              />
+            </div>
+            <button type="submit" class="search-btn" id="searchBtn">
+              <span class="btn-text">Search</span>
+              <svg
+                class="btn-arrow"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+              >
+                <line x1="5" y1="12" x2="19" y2="12" />
+                <polyline points="12 5 19 12 12 19" />
+              </svg>
+            </button>
+          </div>
+        </form>
+      </header>
+
+      <!-- Status -->
+      <div class="status-area" id="statusArea">
+        <div class="loader" id="loader">
+          <div class="loader-ring"></div>
+          <p class="loader-text">
+            Scraping Google Images<span class="dots"></span>
+          </p>
+        </div>
+        <div class="error-msg" id="errorMsg"></div>
+      </div>
+
+      <!-- Results -->
+      <main class="results" id="results">
+        <div class="results-header" id="resultsHeader">
+          <h2 id="resultsTitle"></h2>
+          <div class="results-actions">
+            <button class="action-btn" id="copyAllBtn" title="Copy all URLs">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <rect x="9" y="9" width="13" height="13" rx="2" />
+                <path
+                  d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"
+                />
+              </svg>
+              Copy All
+            </button>
+            <button class="action-btn" id="downloadBtn" title="Download as TXT">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+              >
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Download
+            </button>
+          </div>
+        </div>
+        <ul class="image-list" id="imageList"></ul>
+      </main>
+
+      <!-- Footer -->
+      <footer class="footer">
+        <p>
+          Built with Puppeteer &amp; Express &bull; For educational use only
+        </p>
+      </footer>
+    </div>
+
+    <div id="lightbox" class="lightbox">
+    <span class="lightbox-close">&times;</span>
+    <img class="lightbox-content" id="lightbox-img">
+    <div class="lightbox-caption" id="caption"></div>
+    <a id="lightbox-download" class="lightbox-download-btn" href="#" download target="_blank">Download High Res</a>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+    <script src="script.js"></script>
+  </body>
+</html>
