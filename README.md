@@ -5,20 +5,20 @@ A high-performance, Node.js-based scraper for Google Images built with Puppeteer
 ## 🚀 Key Features
 
 - **High Performance**: Reuses a single browser instance to eliminate startup latency (saves ~1-2s per request).
-- **SEO-Friendly Scraping**: Simulates a real desktop browser (Chrome on Windows) to bypass basic bot detection and render dynamic content.
+- **Bot Detection Avoidance**: Simulates a real desktop browser (Chrome on Windows) to bypass basic bot detection and render dynamic content.
 - **Smart Resource Management**: Blocks unnecessary assets (images, fonts, stylesheets) during the search phase to speed up page loads by up to 3x.
 - **Fast Validation**: Validates image URLs in parallel using lightweight Node.js HEAD requests, ensuring only accessible images are returned.
 - **Intelligent Scrolling**: Custom auto-scroll logic mimics human interaction to trigger lazy-loading of images.
 - **In-Memory Caching**: Caches search results for 1 hour, providing instant sub-millisecond responses for repeat queries.
 
-## 🛠️ Technical Architecture & SEO Mechanics
+## 🛠️ Technical Architecture & Scraping Mechanics
 
 This scraper is built to handle the complexities of modern Single Page Applications (SPAs) like Google Images while maintaining high throughput.
 
-### 1. Browser Simulation (SEO & Detection Avoidance)
+### 1. Browser Simulation (Detection Avoidance)
 
 - **User-Agent Spoofing**: The scraper sets a standard `Mozilla/5.0...` User-Agent string to identify as a legitimate Chrome browser on Windows 10. This prevents Google from serving a simplified WAP version of the page or blocking the request immediately.
-- **Dynamic Rendering**: Uses Puppeteer (Headless Chrome) to fully execute JavaScript, ensuring that dynamic content (which Google uses heavily for image grids) is properly rendered. This is crucial for "SEO" scraping where static HTML parsers fail.
+- **Dynamic Rendering**: Uses Puppeteer (Headless Chrome) to fully execute JavaScript, ensuring that dynamic content (which Google uses heavily for image grids) is properly rendered. This is crucial for scraping modern SPAs where static HTML parsers fail.
 
 ### 2. Performance Optimization
 
@@ -87,7 +87,25 @@ curl "http://localhost:3000/api/search?q=puppy&count=10"
 }
 ```
 
-## 📝 License
+## � Docker Support
+
+You can run the scraper in a Docker container to ensure a consistent environment.
+
+### 1. Build the Image
+
+```bash
+docker build -t google-scraper .
+```
+
+### 2. Run the Container
+
+```bash
+docker run -p 3000:3000 google-scraper
+```
+
+The API will be available at `http://localhost:3000/api/search`.
+
+## �📝 License
 
 ISC
 
