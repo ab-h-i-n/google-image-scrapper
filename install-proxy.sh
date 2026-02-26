@@ -59,6 +59,16 @@ cache_log /var/log/squid/cache.log
 cache deny all
 EOF
 
+echo "==> Configuring UFW firewall..."
+if command -v ufw &>/dev/null; then
+    ufw allow 22/tcp
+    ufw allow ${SQUID_PORT}/tcp
+    echo "y" | ufw enable
+    echo "    UFW enabled: ports 22 and ${SQUID_PORT} allowed."
+else
+    echo "    UFW not found, skipping firewall setup."
+fi
+
 echo "==> Starting Squid..."
 systemctl enable squid
 systemctl restart squid

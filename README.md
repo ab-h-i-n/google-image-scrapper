@@ -37,22 +37,6 @@ TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-m
 | SSH | 22 | Your IP | SSH access |
 | Custom TCP | 3128 | Main EC2 private IP/32 (e.g. `172.31.4.41/32`) | Squid proxy |
 
-### UFW Firewall Setup (on each Proxy EC2)
-
-If UFW is active on your proxy instances, allow port 3128:
-
-```bash
-sudo ufw allow 3128/tcp
-sudo ufw reload
-```
-
-Check UFW status:
-```bash
-sudo ufw status
-```
-
----
-
 ### Step 1: Set Up Proxy EC2 Instances
 
 SSH into each proxy EC2 and run:
@@ -185,7 +169,6 @@ http://<MAIN_EC2_PUBLIC_IP>
 | `curl` hangs/times out | AWS security group missing port 3128 rule | Add inbound rule for port 3128 from main EC2 IP |
 | `403 CONNECT tunnel failed` | Squid ACL rejecting your IP | Re-run `install-proxy.sh` with correct main EC2 IP, or fix manually: `sudo sed -i 's\|acl main_ec2 src .*/32\|acl main_ec2 src <MAIN_EC2_PRIVATE_IP>/32\|' /etc/squid/squid.conf && sudo systemctl restart squid` |
 | `Connection refused` | Squid not running | `sudo systemctl restart squid` and check `sudo systemctl status squid` |
-| UFW blocking | OS firewall active | `sudo ufw allow 3128/tcp` |
 
 ---
 
@@ -194,8 +177,7 @@ http://<MAIN_EC2_PUBLIC_IP>
 1. Launch a new EC2 instance
 2. Add port 3128 inbound rule in its security group (source: main EC2 IP)
 3. Run `install-proxy.sh` on it with your main EC2's private IP
-4. If UFW is active: `sudo ufw allow 3128/tcp`
-5. Add its IP to `PROXY_LIST` in `.env` on the main EC2
+4. Add its IP to `PROXY_LIST` in `.env` on the main EC2
 6. `docker compose up -d --build`
 
 ---
