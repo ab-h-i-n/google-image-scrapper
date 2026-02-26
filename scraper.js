@@ -109,7 +109,7 @@ async function scrapeGoogleImages(entry, query, maxImages = 20) {
         const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=isch`;
         console.log(`[Scraper] Navigating to: ${searchUrl}`);
 
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
         console.log('[Scraper] Page loaded.');
 
         // Handle consent if present (fast check)
