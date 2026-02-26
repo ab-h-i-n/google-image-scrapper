@@ -1,10 +1,15 @@
 #!/bin/bash
 # Run this on each proxy EC2 instance (Ubuntu/Amazon Linux 2)
-# Usage: chmod +x install-proxy.sh && sudo ./install-proxy.sh <MAIN_EC2_PRIVATE_IP>
+# Usage: chmod +x install-proxy.sh && sudo ./install-proxy.sh <MAIN_EC2_IP> [<ADDITIONAL_IP> ...]
+# Pass the main EC2's IP that will connect to this proxy.
+# If connecting across VPCs or from localhost, pass the public IP.
+# You can pass multiple IPs to allow additional clients (e.g., your local dev machine).
 
 set -e
 
-MAIN_EC2_IP="${1:?Usage: sudo ./install-proxy.sh <MAIN_EC2_PRIVATE_IP>}"
+MAIN_EC2_IP="${1:?Usage: sudo ./install-proxy.sh <MAIN_EC2_IP> [<ADDITIONAL_IP> ...]}"
+shift
+EXTRA_IPS=("$@")
 SQUID_PORT=3128
 
 echo "==> Setting up 2GB swap..."
@@ -36,10 +41,26 @@ echo "==> Configuring Squid..."
 SQUID_CONF="/etc/squid/squid.conf"
 cp "$SQUID_CONF" "$SQUID_CONF.bak"
 
+EXTRA_ACL=""
+EXTRA_ALLOW=""
+for i in "${!EXTRA_IPS[@]}"; do
+    EXTRA_ACL="${EXTRA_ACL}acl extra_$i src ${EXTRA_IPS[$i]}/32
+"
+    EXTRA_ALLOW="${EXTRA_ALLOW}http_access allow extra_$i
+"
+done
+
 cat > "$SQUID_CONF" <<EOF
-# Allow only the main scraper EC2
+# Allowed clients
 acl main_ec2 src ${MAIN_EC2_IP}/32
+${EXTRA_ACL}
+# HTTPS CONNECT support
+acl SSL_ports port 443
+acl CONNECT method CONNECT
+
+# Allow clients first, then restrict
 http_access allow main_ec2
+${EXTRA_ALLOW}http_access deny CONNECT !SSL_ports
 http_access deny all
 
 # Port
@@ -74,7 +95,7 @@ systemctl enable squid
 systemctl restart squid
 
 echo "==> Done! Squid proxy running on port ${SQUID_PORT}"
-echo "    Only accepting connections from ${MAIN_EC2_IP}"
+echo "    Accepting connections from: ${MAIN_EC2_IP} ${EXTRA_IPS[*]}"
 echo ""
 echo "    Test from main EC2:"
 echo "    curl -x http://$(hostname -I | awk '{print $1}'):${SQUID_PORT} https://httpbin.org/ip"

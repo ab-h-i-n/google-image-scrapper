@@ -35,7 +35,7 @@ TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-m
 | Type | Port | Source | Purpose |
 |------|------|--------|---------|
 | SSH | 22 | Your IP | SSH access |
-| Custom TCP | 3128 | Main EC2 private IP/32 (e.g. `172.31.4.41/32`) | Squid proxy |
+| Custom TCP | 3128 | Main EC2 IP/32 (private if same VPC, public if cross-VPC) | Squid proxy |
 
 ### Step 1: Set Up Proxy EC2 Instances
 
@@ -48,15 +48,20 @@ scp -i your-key.pem install-proxy.sh ubuntu@<PROXY_EC2_PUBLIC_IP>:~/
 # SSH in
 ssh -i your-key.pem ubuntu@<PROXY_EC2_PUBLIC_IP>
 
-# Run the installer with your main EC2's private IP
+# Run the installer with the IP of the machine that will connect to this proxy
+# Use private IP if same VPC, public IP if cross-VPC or local dev
 chmod +x install-proxy.sh
-sudo ./install-proxy.sh <MAIN_EC2_PRIVATE_IP>
+sudo ./install-proxy.sh <MAIN_EC2_IP>
+
+# To also allow your local machine for development:
+sudo ./install-proxy.sh <MAIN_EC2_IP> <YOUR_LOCAL_PUBLIC_IP>
 ```
 
 This will:
 - Create a 2GB swap file
 - Install and configure Squid proxy
-- Only allow connections from your main EC2
+- Allow connections only from the specified IPs
+- Ensure correct ACL ordering (allow before deny) for HTTPS CONNECT support
 - Strip proxy headers so Google can't detect proxy usage
 
 Verify it's running:
@@ -166,9 +171,35 @@ http://<MAIN_EC2_PUBLIC_IP>
 
 | Problem | Likely Cause | Fix |
 |---------|-------------|-----|
-| `curl` hangs/times out | AWS security group missing port 3128 rule | Add inbound rule for port 3128 from main EC2 IP |
-| `403 CONNECT tunnel failed` | Squid ACL rejecting your IP | Re-run `install-proxy.sh` with correct main EC2 IP, or fix manually: `sudo sed -i 's\|acl main_ec2 src .*/32\|acl main_ec2 src <MAIN_EC2_PRIVATE_IP>/32\|' /etc/squid/squid.conf && sudo systemctl restart squid` |
+| `curl` hangs/times out | AWS security group missing port 3128 rule | Add inbound rule for port 3128 from the connecting IP |
+| `403 CONNECT tunnel failed` | Squid ACL rejecting your IP | See "ACL issues" below |
+| `ERR_TUNNEL_CONNECTION_FAILED` | Same as 403 — Squid blocking the CONNECT request | See "ACL issues" below |
 | `Connection refused` | Squid not running | `sudo systemctl restart squid` and check `sudo systemctl status squid` |
+
+**ACL issues (403 / ERR_TUNNEL_CONNECTION_FAILED):**
+
+This is the most common issue. Squid denies connections from IPs not in its ACL. Common causes:
+
+1. **Wrong IP type**: If your main EC2 connects to the proxy via its **public** IP (cross-VPC or different region), Squid sees the public IP, not the private one. Pass the public IP to `install-proxy.sh`.
+2. **ACL order matters**: `http_access allow` rules must come **before** `http_access deny` rules. The updated `install-proxy.sh` handles this correctly.
+3. **Local development**: When running the scraper from your local machine, your ISP's public IP must be in the ACL. Pass it as an extra IP: `sudo ./install-proxy.sh <MAIN_EC2_IP> <YOUR_LOCAL_PUBLIC_IP>`
+
+To check which IP Squid sees, enable access logging temporarily on the proxy:
+```bash
+sudo sed -i 's|access_log none|access_log daemon:/var/log/squid/access.log|' /etc/squid/squid.conf
+sudo systemctl restart squid
+# Make a request, then check:
+sudo tail -20 /var/log/squid/access.log
+# Disable logging when done:
+sudo sed -i 's|access_log daemon:/var/log/squid/access.log|access_log none|' /etc/squid/squid.conf
+sudo systemctl restart squid
+```
+
+To manually add an IP to the ACL:
+```bash
+sudo sed -i '/http_access deny all/i acl myip src <IP>/32\nhttp_access allow myip' /etc/squid/squid.conf
+sudo systemctl restart squid
+```
 
 ---
 
