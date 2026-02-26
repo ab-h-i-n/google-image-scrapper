@@ -15,7 +15,7 @@ const BROWSER_ARGS = [
     '--no-zygote',
     '--single-process',
     '--disable-gpu',
-    '--window-size=1920,1080'
+    '--window-size=800,600'
 ];
 
 /**
@@ -23,34 +23,50 @@ const BROWSER_ARGS = [
  * @returns {Promise<{browsers: import('puppeteer').Browser[], getNext: () => import('puppeteer').Browser}>}
  */
 async function initBrowser() {
-    const browsers = [];
+    const pool = []; // { browser, label }
+
+    async function createEntry(args, label) {
+        const browser = await puppeteer.launch({ headless: 'new', args });
+        const page = await browser.newPage();
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            const type = req.resourceType();
+            if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        );
+        return { browser, page, label, busy: false };
+    }
 
     // Direct browser (no proxy, uses main EC2 IP)
     console.log('[Scraper] Launching direct browser...');
-    browsers.push(await puppeteer.launch({ headless: 'new', args: BROWSER_ARGS }));
+    pool.push(await createEntry(BROWSER_ARGS, 'direct'));
 
     // One browser per proxy
     for (const proxy of PROXIES) {
         console.log(`[Scraper] Launching browser with proxy ${proxy}...`);
         try {
-            browsers.push(await puppeteer.launch({
-                headless: 'new',
-                args: [...BROWSER_ARGS, `--proxy-server=http://${proxy}:${PROXY_PORT}`],
-            }));
+            pool.push(await createEntry([...BROWSER_ARGS, `--proxy-server=http://${proxy}:${PROXY_PORT}`], proxy));
         } catch (err) {
             console.error(`[Scraper] Failed to launch browser for proxy ${proxy}:`, err.message);
         }
     }
 
-    console.log(`[Scraper] Browser pool ready: ${browsers.length} browsers`);
+    console.log(`[Scraper] Browser pool ready: ${pool.length} browsers`);
 
     let index = 0;
     return {
-        browsers,
+        browsers: pool.map(p => p.browser),
         getNext() {
-            const b = browsers[index % browsers.length];
+            const entry = pool[index % pool.length];
             index++;
-            return b;
+            console.log(`[Scraper] Using proxy: ${entry.label}`);
+            return entry;
         },
     };
 }
@@ -87,70 +103,45 @@ async function validateImage(url) {
  * @param {number} maxImages - Maximum number of image URLs to return (default 20).
  * @returns {Promise<string[]>} Array of image URLs.
  */
-async function scrapeGoogleImages(browser, query, maxImages = 20) {
-    let page;
+async function scrapeGoogleImages(entry, query, maxImages = 20) {
+    const { page } = entry;
     try {
-        page = await browser.newPage();
-
-        // 1. Optimization: Block unnecessary resources
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            const resourceType = req.resourceType();
-            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-                req.abort();
-            } else {
-                req.continue();
-            }
-        });
-
-        // Set a realistic user agent
-        await page.setUserAgent(
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        );
-
-        await page.setViewport({ width: 1920, height: 1080 });
-
         const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&tbm=isch`;
         console.log(`[Scraper] Navigating to: ${searchUrl}`);
 
-        // 2. Optimization: Fail fast if network is slow
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 15000 });
+        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 8000 });
         console.log('[Scraper] Page loaded.');
 
         // Handle consent if present (fast check)
         try {
-            const consentButton = await page.$('button[aria-label="Accept all"]'); // adjust selector based on locale/update
+            const consentButton = await page.$('button[aria-label="Accept all"]');
              if (consentButton) {
                 console.log('[Scraper] Clicking consent button...');
                 await consentButton.click();
-                 // small wait for navigation/reload
-                await new Promise(r => setTimeout(r, 500)); 
+                await new Promise(r => setTimeout(r, 500));
             }
         } catch (e) {}
 
-
-        // 3. Optimization: Fast Scroll
+        // Fast Scroll
         console.log('[Scraper] Scrolling...');
         await page.evaluate(async () => {
             await new Promise((resolve) => {
                 let totalHeight = 0;
-                const distance = 500; // larger scroll distance
+                const distance = 500;
                 const timer = setInterval(() => {
                     window.scrollBy(0, distance);
                     totalHeight += distance;
-                    // Stop sooner if we have enough content presumably
                     if (totalHeight >= document.body.scrollHeight || totalHeight > 5000) {
                         clearInterval(timer);
                         resolve();
                     }
-                }, 50); // faster interval
+                }, 50);
             });
         });
         console.log('[Scraper] Scroll complete.');
 
         // Get page content
         const html = await page.content();
-        await page.close(); // Close page as soon as we have HTML
 
         // Strategy: Regex extraction from page source
         const regex = /(?:https?:\/\/|https?:\\\/\\\/)[^"'\s\\]+\.(?:jpg|jpeg|png|gif|webp)/gi;
@@ -205,7 +196,6 @@ async function scrapeGoogleImages(browser, query, maxImages = 20) {
 
     } catch (error) {
         console.error('[Scraper] Error:', error);
-        if (page && !page.isClosed()) await page.close();
         return [];
     }
 }
