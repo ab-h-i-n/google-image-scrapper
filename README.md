@@ -1,118 +1,222 @@
 # Google Image Scraper
 
-A high-performance, Node.js-based scraper for Google Images built with Puppeteer. This tool is designed to mimic real user behavior while maximizing scraping speed through intelligent resource management and caching.
+A high-performance Google Images scraper built with Node.js and Puppeteer, with proxy-based IP rotation to avoid blocks.
 
-## 🚀 Key Features
+## EC2 Deployment Guide
 
-- **High Performance**: Reuses a single browser instance to eliminate startup latency (saves ~1-2s per request).
-- **Bot Detection Avoidance**: Simulates a real desktop browser (Chrome on Windows) to bypass basic bot detection and render dynamic content.
-- **Smart Resource Management**: Blocks unnecessary assets (images, fonts, stylesheets) during the search phase to speed up page loads by up to 3x.
-- **Fast Validation**: Validates image URLs in parallel using lightweight Node.js HEAD requests, ensuring only accessible images are returned.
-- **Intelligent Scrolling**: Custom auto-scroll logic mimics human interaction to trigger lazy-loading of images.
-- **In-Memory Caching**: Caches search results for 1 hour, providing instant sub-millisecond responses for repeat queries.
+### Prerequisites
 
-## 🛠️ Technical Architecture & Scraping Mechanics
+- An AWS account with EC2 access
+- At least 2 EC2 instances (1 main + 1 or more proxy)
+- All instances should be in the **same VPC** for free internal traffic
+- Security groups configured (see below)
 
-This scraper is built to handle the complexities of modern Single Page Applications (SPAs) like Google Images while maintaining high throughput.
+### Security Group Setup
 
-### 1. Browser Simulation (Detection Avoidance)
+**Main EC2 (scraper app):**
+| Port | Source | Purpose |
+|------|--------|---------|
+| 22 | Your IP | SSH access |
+| 80 | 0.0.0.0/0 | Public HTTP access |
 
-- **User-Agent Spoofing**: The scraper sets a standard `Mozilla/5.0...` User-Agent string to identify as a legitimate Chrome browser on Windows 10. This prevents Google from serving a simplified WAP version of the page or blocking the request immediately.
-- **Dynamic Rendering**: Uses Puppeteer (Headless Chrome) to fully execute JavaScript, ensuring that dynamic content (which Google uses heavily for image grids) is properly rendered. This is crucial for scraping modern SPAs where static HTML parsers fail.
+**Proxy EC2(s):**
+| Port | Source | Purpose |
+|------|--------|---------|
+| 22 | Your IP | SSH access |
+| 3128 | Main EC2 security group | Squid proxy |
 
-### 2. Performance Optimization
+---
 
-- **Resource Interception**: To speed up the "search" phase, the scraper intercepts network requests and **aborts** loading of:
-  - Images (on the search results page itself)
-  - Stylesheets (CSS)
-  - Fonts
-  - Media
-    This allows the scraper to download _only_ the HTML structure and JS needed to find image URLs, significantly reducing bandwidth and CPU usage.
-- **Parallel Validation**: Instead of checking images sequentially or inside the heavyweight browser context, the scraper extracts potential URLs and verifies them using lightweight Node.js `http/https` requests. This allows validating 50+ images in seconds.
+### Step 1: Set Up Proxy EC2 Instances
 
-### 3. Caching Strategy
-
-- **Mechanism**: In-memory `Map`.
-- **Key**: `${query}_${count}` (e.g. `ferrari_20`).
-- **TTL**: 1 hour (3600 seconds).
-- **Benefit**: drastically reduces load on Google's servers and provides instant responses for popular queries.
-
-## 📦 Installation
-
-Prerequisites: Node.js 18+
-
-1.  Clone the repository.
-2.  Install dependencies:
-    ```bash
-    npm install
-    ```
-3.  (Optional) Install Puppeteer specifically if needed (handled by package.json).
-
-## 🚦 Usage
-
-Start the server:
+SSH into each proxy EC2 and run:
 
 ```bash
-node server.js
+# Download the install script (or scp it from your machine)
+scp -i your-key.pem install-proxy.sh ubuntu@<PROXY_EC2_PUBLIC_IP>:~/
+
+# SSH in
+ssh -i your-key.pem ubuntu@<PROXY_EC2_PUBLIC_IP>
+
+# Run the installer (defaults to main EC2 IP <MAIN_EC2_PUBLIC_IP>)
+chmod +x install-proxy.sh
+sudo ./install-proxy.sh
 ```
 
-The server will start on port `3000` and launch a headless Chrome instance in the background.
+This will:
+- Create a 2GB swap file
+- Install and configure Squid proxy
+- Only allow connections from your main EC2
+- Strip proxy headers so Google can't detect proxy usage
 
-### API Endpoint
+Verify it's running:
+```bash
+sudo systemctl status squid
+```
+
+Repeat for each proxy EC2 instance.
+
+---
+
+### Step 2: Set Up Main EC2 (Scraper App)
+
+SSH into your main EC2:
+
+```bash
+ssh -i your-key.pem ubuntu@<MAIN_EC2_PUBLIC_IP>
+```
+
+#### Install Docker
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl gnupg
+
+# Add Docker's official GPG key
+sudo install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+# Add Docker repo
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+# Install Docker
+sudo apt update
+sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+
+# Allow running docker without sudo
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+#### Clone and Run the App
+
+```bash
+git clone <your-repo-url> google-search-scrapper
+cd google-search-scrapper
+```
+
+Run with proxy IP rotation:
+
+```bash
+docker compose up -d --build
+```
+
+Configure your proxy IPs in the `.env` file (see `.env.example`):
+
+```bash
+cp .env.example .env
+# Edit .env with your proxy EC2 private IPs
+```
+
+Example `.env`:
+```
+PORT=3000
+PROXY_LIST=10.0.1.10,10.0.1.11,10.0.1.12
+```
+
+To apply changes, restart:
+
+```bash
+docker compose up -d --build
+```
+
+---
+
+### Step 3: Verify Everything Works
+
+From your main EC2, test each proxy:
+
+```bash
+# Test proxy connectivity
+curl -x http://<PROXY_EC2_PRIVATE_IP>:3128 https://httpbin.org/ip
+```
+
+Test the scraper API:
+
+```bash
+curl "http://localhost/api/search?q=puppies&count=5"
+```
+
+From your browser, visit:
+
+```
+http://<MAIN_EC2_PUBLIC_IP>
+```
+
+---
+
+## Adding More Proxies
+
+1. Launch a new EC2 instance in the same VPC
+2. Add port 3128 inbound rule from main EC2's security group
+3. Run `install-proxy.sh` on it
+4. Add its private IP to `PROXY_LIST` in `docker-compose.yml`
+5. `docker compose up -d --build`
+
+---
+
+## API Reference
 
 **GET** `/api/search`
 
 | Parameter | Type   | Default    | Description                         |
-| :-------- | :----- | :--------- | :---------------------------------- |
-| `q`       | string | (Required) | The search query (e.g. "red roses") |
+|-----------|--------|------------|-------------------------------------|
+| `q`       | string | (required) | Search query (e.g. "red roses")     |
 | `count`   | number | 20         | Number of images to return (max 50) |
 
-#### Example Request
+**Example:**
 
 ```bash
-curl "http://localhost:3000/api/search?q=puppy&count=10"
+curl "http://<YOUR_EC2_IP>/api/search?q=sunset&count=10"
 ```
 
-#### Example Response
+**Response:**
 
 ```json
 {
-  "query": "puppy",
+  "query": "sunset",
   "count": 10,
   "images": [
     "https://example.com/image1.jpg",
-    "https://example.com/image2.jpg",
-    ...
+    "https://example.com/image2.jpg"
   ]
 }
 ```
 
-## � Docker Support
+---
 
-You can run the scraper in a Docker container to ensure a consistent environment.
+## Architecture
 
-### 1. Build the Image
-
-```bash
-docker build -t google-scraper .
+```
+User Request
+     │
+     ▼
+Main EC2 (Docker)
+├── Express API (port 80 → 3000)
+├── Browser Pool (round-robin)
+│   ├── Direct (main EC2 IP)
+│   ├── Proxy 1 → EC2-A (Squid)
+│   ├── Proxy 2 → EC2-B (Squid)
+│   └── Proxy N → EC2-N (Squid)
+└── In-memory cache (1hr TTL)
 ```
 
-### 2. Run the Container
+Each request rotates to the next browser/proxy, distributing load across IPs.
 
-```bash
-docker run -p 3000:3000 google-scraper
-```
+---
 
-The API will be available at `http://localhost:3000/api/search`.
-
-## �📝 License
-
-ISC
-
-## ⚠️ Disclaimer
+## Disclaimer
 
 This tool is for **educational purposes only**.
 
 - Scraping Google Search results may violate Google's Terms of Service.
-- The author is not responsible for any misuse of this tool or any consequences resulting from its use (e.g., IP bans).
-- Please use responsibly and consider using the official Google Custom Search API for production applications.
+- The author is not responsible for any misuse or consequences (e.g., IP bans).
+- Consider using the official Google Custom Search API for production use.
+
+## License
+
+ISC

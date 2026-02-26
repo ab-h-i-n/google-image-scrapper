@@ -2,26 +2,57 @@ const puppeteer = require('puppeteer');
 const https = require('https');
 const http = require('http');
 
+// Proxy servers for IP rotation (add more as you spin up EC2s)
+const PROXY_PORT = 3128;
+const PROXIES = (process.env.PROXY_LIST || '').split(',').map(p => p.trim()).filter(Boolean);
+
+const BROWSER_ARGS = [
+    '--no-sandbox',
+    '--disable-setuid-sandbox',
+    '--disable-dev-shm-usage',
+    '--disable-accelerated-2d-canvas',
+    '--no-first-run',
+    '--no-zygote',
+    '--single-process',
+    '--disable-gpu',
+    '--window-size=1920,1080'
+];
+
 /**
- * Initialize a shared browser instance.
- * @returns {Promise<import('puppeteer').Browser>}
+ * Initialize a browser pool — one per proxy + one direct (no proxy).
+ * @returns {Promise<{browsers: import('puppeteer').Browser[], getNext: () => import('puppeteer').Browser}>}
  */
 async function initBrowser() {
-    console.log('[Scraper] Launching browser...');
-    return await puppeteer.launch({
-        headless: 'new',
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--single-process',
-            '--disable-gpu',
-            '--window-size=1920,1080'
-        ],
-    });
+    const browsers = [];
+
+    // Direct browser (no proxy, uses main EC2 IP)
+    console.log('[Scraper] Launching direct browser...');
+    browsers.push(await puppeteer.launch({ headless: 'new', args: BROWSER_ARGS }));
+
+    // One browser per proxy
+    for (const proxy of PROXIES) {
+        console.log(`[Scraper] Launching browser with proxy ${proxy}...`);
+        try {
+            browsers.push(await puppeteer.launch({
+                headless: 'new',
+                args: [...BROWSER_ARGS, `--proxy-server=http://${proxy}:${PROXY_PORT}`],
+            }));
+        } catch (err) {
+            console.error(`[Scraper] Failed to launch browser for proxy ${proxy}:`, err.message);
+        }
+    }
+
+    console.log(`[Scraper] Browser pool ready: ${browsers.length} browsers`);
+
+    let index = 0;
+    return {
+        browsers,
+        getNext() {
+            const b = browsers[index % browsers.length];
+            index++;
+            return b;
+        },
+    };
 }
 
 /**

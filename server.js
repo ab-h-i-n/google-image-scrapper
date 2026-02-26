@@ -5,7 +5,7 @@ const { scrapeGoogleImages, initBrowser } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-let browser;
+let browserPool;
 
 app.use(cors());
 app.use(express.json());
@@ -18,8 +18,8 @@ const CACHE_TTL = 3600 * 1000; // 1 hour
 // Initialize browser
 (async () => {
     try {
-        browser = await initBrowser();
-        console.log('[Server] Browser initialized successfully.');
+        browserPool = await initBrowser();
+        console.log('[Server] Browser pool initialized successfully.');
     } catch (err) {
         console.error('[Server] Failed to initialize browser:', err);
         process.exit(1);
@@ -34,7 +34,7 @@ app.get('/api/search', async (req, res) => {
     return res.status(400).json({ error: 'Missing required query parameter "q"' });
   }
 
-  if (!browser) {
+  if (!browserPool) {
       return res.status(503).json({ error: 'Server starting up, please try again in a few seconds.' });
   }
 
@@ -55,6 +55,7 @@ app.get('/api/search', async (req, res) => {
   console.log(`[Server] Search request: "${q}" (max ${maxImages} images)`);
 
   try {
+    const browser = browserPool.getNext();
     const images = await scrapeGoogleImages(browser, q.trim(), maxImages);
     const responseData = { query: q.trim(), count: images.length, images };
     
@@ -76,9 +77,9 @@ app.listen(PORT, () => {
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
-    if (browser) {
-        console.log('[Server] Closing browser...');
-        await browser.close();
+    if (browserPool) {
+        console.log('[Server] Closing all browsers...');
+        await Promise.all(browserPool.browsers.map(b => b.close()));
     }
     process.exit();
 });

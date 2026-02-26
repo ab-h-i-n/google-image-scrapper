@@ -3,10 +3,7 @@ services:
   scraper:
     build: .
     ports:
-      - "3000:3000"
-    environment:
-      - PORT=3000
-    # Mount source code for development (optional, remove for production)
-    # volumes:
-    #   - .:/usr/src/app
-    #   - /usr/src/app/node_modules
+      - "80:3000"
+    env_file:
+      - .env
+    restart: unless-stopped
