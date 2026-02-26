@@ -8,22 +8,48 @@ A high-performance Google Images scraper built with Node.js and Puppeteer, with 
 
 - An AWS account with EC2 access
 - At least 2 EC2 instances (1 main + 1 or more proxy)
-- All instances should be in the **same VPC** for free internal traffic
 - Security groups configured (see below)
 
-### Security Group Setup
+### Same VPC vs Different VPC
+
+Check if your instances are in the same VPC by running this on each EC2:
+
+```bash
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60") && curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/network/interfaces/macs/ | head -1 | xargs -I{} curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/network/interfaces/macs/{}vpc-id
+```
+
+| Scenario | Which IP to use | Notes |
+|----------|----------------|-------|
+| **Same VPC** | Private IP (e.g. `172.31.x.x`) | Free traffic, lower latency, more secure, never changes |
+| **Different VPC/Region** | Public IP (Elastic IP recommended) | Elastic IPs don't change on restart; regular public IPs do |
+
+### AWS Security Group Setup
 
 **Main EC2 (scraper app):**
-| Port | Source | Purpose |
-|------|--------|---------|
-| 22 | Your IP | SSH access |
-| 80 | 0.0.0.0/0 | Public HTTP access |
+| Type | Port | Source | Purpose |
+|------|------|--------|---------|
+| SSH | 22 | Your IP | SSH access |
+| HTTP | 80 | 0.0.0.0/0 | Public HTTP access |
 
 **Proxy EC2(s):**
-| Port | Source | Purpose |
-|------|--------|---------|
-| 22 | Your IP | SSH access |
-| 3128 | Main EC2 security group | Squid proxy |
+| Type | Port | Source | Purpose |
+|------|------|--------|---------|
+| SSH | 22 | Your IP | SSH access |
+| Custom TCP | 3128 | Main EC2 private IP/32 (e.g. `172.31.4.41/32`) | Squid proxy |
+
+### UFW Firewall Setup (on each Proxy EC2)
+
+If UFW is active on your proxy instances, allow port 3128:
+
+```bash
+sudo ufw allow 3128/tcp
+sudo ufw reload
+```
+
+Check UFW status:
+```bash
+sudo ufw status
+```
 
 ---
 
@@ -38,9 +64,9 @@ scp -i your-key.pem install-proxy.sh ubuntu@<PROXY_EC2_PUBLIC_IP>:~/
 # SSH in
 ssh -i your-key.pem ubuntu@<PROXY_EC2_PUBLIC_IP>
 
-# Run the installer (defaults to main EC2 IP <MAIN_EC2_PUBLIC_IP>)
+# Run the installer with your main EC2's private IP
 chmod +x install-proxy.sh
-sudo ./install-proxy.sh
+sudo ./install-proxy.sh <MAIN_EC2_PRIVATE_IP>
 ```
 
 This will:
@@ -52,6 +78,7 @@ This will:
 Verify it's running:
 ```bash
 sudo systemctl status squid
+sudo ss -tlnp | grep 3128
 ```
 
 Repeat for each proxy EC2 instance.
@@ -99,26 +126,26 @@ git clone <your-repo-url> google-search-scrapper
 cd google-search-scrapper
 ```
 
-Run with proxy IP rotation:
+Configure your proxy IPs in the `.env` file:
+
+```bash
+cp .env.example .env
+nano .env
+```
+
+Example `.env` (use private IPs if same VPC, public/Elastic IPs if different VPC):
+```
+PORT=3000
+PROXY_LIST=172.31.35.106,172.31.40.50
+```
+
+Build and run:
 
 ```bash
 docker compose up -d --build
 ```
 
-Configure your proxy IPs in the `.env` file (see `.env.example`):
-
-```bash
-cp .env.example .env
-# Edit .env with your proxy EC2 private IPs
-```
-
-Example `.env`:
-```
-PORT=3000
-PROXY_LIST=10.0.1.10,10.0.1.11,10.0.1.12
-```
-
-To apply changes, restart:
+To apply changes after editing `.env`, restart:
 
 ```bash
 docker compose up -d --build
@@ -131,9 +158,11 @@ docker compose up -d --build
 From your main EC2, test each proxy:
 
 ```bash
-# Test proxy connectivity
-curl -x http://<PROXY_EC2_PRIVATE_IP>:3128 https://httpbin.org/ip
+# Test proxy connectivity (use private or public IP based on your setup)
+curl -x http://<PROXY_EC2_IP>:3128 https://httpbin.org/ip
 ```
+
+The response should show the **proxy EC2's public IP**, not your main EC2's IP.
 
 Test the scraper API:
 
@@ -149,13 +178,25 @@ http://<MAIN_EC2_PUBLIC_IP>
 
 ---
 
+### Troubleshooting
+
+| Problem | Likely Cause | Fix |
+|---------|-------------|-----|
+| `curl` hangs/times out | AWS security group missing port 3128 rule | Add inbound rule for port 3128 from main EC2 IP |
+| `403 CONNECT tunnel failed` | Squid ACL rejecting your IP | Re-run `install-proxy.sh` with correct main EC2 IP, or fix manually: `sudo sed -i 's\|acl main_ec2 src .*/32\|acl main_ec2 src <MAIN_EC2_PRIVATE_IP>/32\|' /etc/squid/squid.conf && sudo systemctl restart squid` |
+| `Connection refused` | Squid not running | `sudo systemctl restart squid` and check `sudo systemctl status squid` |
+| UFW blocking | OS firewall active | `sudo ufw allow 3128/tcp` |
+
+---
+
 ## Adding More Proxies
 
-1. Launch a new EC2 instance in the same VPC
-2. Add port 3128 inbound rule from main EC2's security group
-3. Run `install-proxy.sh` on it
-4. Add its private IP to `PROXY_LIST` in `docker-compose.yml`
-5. `docker compose up -d --build`
+1. Launch a new EC2 instance
+2. Add port 3128 inbound rule in its security group (source: main EC2 IP)
+3. Run `install-proxy.sh` on it with your main EC2's private IP
+4. If UFW is active: `sudo ufw allow 3128/tcp`
+5. Add its IP to `PROXY_LIST` in `.env` on the main EC2
+6. `docker compose up -d --build`
 
 ---
 
