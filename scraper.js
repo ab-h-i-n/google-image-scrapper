@@ -12,7 +12,9 @@ const CHROME_PATH = '/usr/bin/google-chrome';
 const BASE_DEBUG_PORT = 9222;
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '3128');
 const PROXIES = (process.env.PROXY_LIST || '').split(',').map(p => p.trim()).filter(Boolean);
-const USE_XVFB = process.env.USE_XVFB !== '0'; // default: use Xvfb (required on EC2)
+// If DISPLAY is set (e.g. :99 from Xvfb service), Chrome runs non-headless on that display.
+// Otherwise, use xvfb-run to wrap each Chrome process.
+const HAS_DISPLAY = !!process.env.DISPLAY;
 
 function randomDelay(min = 1000, max = 3000) {
     return new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
@@ -44,17 +46,21 @@ function launchChrome(debugPort, label, proxyUrl) {
         args.splice(-1, 0, `--proxy-server=${proxyUrl}`);
     }
 
-    // Use xvfb-run for a virtual display instead of --headless (Google detects headless)
-    let command, commandArgs;
-    if (USE_XVFB) {
-        command = 'xvfb-run';
-        commandArgs = ['--auto-servernum', '--server-args=-screen 0 1920x1080x24', CHROME_PATH, ...args];
-    } else {
+    // Use virtual display instead of --headless (Google detects headless mode).
+    // If DISPLAY env is set (Xvfb service running), Chrome uses it directly.
+    // Otherwise, wrap with xvfb-run.
+    let command, commandArgs, env;
+    if (HAS_DISPLAY) {
         command = CHROME_PATH;
         commandArgs = args;
+        env = { ...process.env };
+    } else {
+        command = 'xvfb-run';
+        commandArgs = ['--auto-servernum', '--server-args=-screen 0 1920x1080x24', CHROME_PATH, ...args];
+        env = { ...process.env };
     }
 
-    const proc = spawn(command, commandArgs, { stdio: 'ignore', detached: false });
+    const proc = spawn(command, commandArgs, { stdio: 'ignore', detached: false, env });
     proc.on('error', (err) => console.error(`[Scraper] Chrome ${label} error:`, err.message));
     return proc;
 }
