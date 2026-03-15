@@ -213,52 +213,14 @@ async function humanType(page, selector, text) {
 }
 
 /**
- * Navigate to Google Images by typing query + clicking Images tab.
+ * Navigate to Google Images search.
+ * Uses direct URL navigation (proven to work without CAPTCHA when Chrome
+ * is spawned natively with Xvfb).
  */
 async function navigateToImageSearch(page, query) {
-    const currentUrl = page.url();
-    if (!currentUrl.includes('google.com') || currentUrl.includes('/sorry/')) {
-        await page.goto('https://www.google.com/', { waitUntil: 'networkidle2', timeout: 15000 });
-        await randomDelay(1000, 2000);
-    }
-
-    const searchSelector = 'textarea[name="q"], input[name="q"]';
-    const searchInput = await page.$(searchSelector);
-    if (!searchInput) throw new Error('Could not find search input');
-
-    await searchInput.click({ clickCount: 3 });
-    await randomDelay(200, 400);
-    await humanType(page, searchSelector, query);
-    await randomDelay(500, 1000);
-
-    await page.keyboard.press('Enter');
-    await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=2`;
+    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await randomDelay(1000, 2000);
-
-    if (await isCaptchaPage(page)) return false;
-
-    // Click Images tab
-    const clicked = await page.evaluate(() => {
-        const links = Array.from(document.querySelectorAll('a'));
-        const imgLink = links.find(a =>
-            a.textContent.trim() === 'Images' ||
-            a.href?.includes('tbm=isch') ||
-            a.href?.includes('udm=2')
-        );
-        if (imgLink) { imgLink.click(); return true; }
-        return false;
-    });
-
-    if (clicked) {
-        await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
-        await randomDelay(1000, 2000);
-    } else {
-        await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}&udm=2`, {
-            waitUntil: 'domcontentloaded', timeout: 15000,
-        });
-        await randomDelay(1000, 2000);
-    }
-
     return !(await isCaptchaPage(page));
 }
 
