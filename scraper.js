@@ -91,6 +91,7 @@ async function createEntry(debugPort, label, proxyUrl) {
     const browser = await puppeteer.connect({
         browserURL: `http://localhost:${debugPort}`,
         defaultViewport: null,
+        protocolTimeout: 120000,
     });
 
     let pages = await browser.pages();
@@ -295,22 +296,11 @@ async function scrapeGoogleImages(entry, query, maxImages = 20) {
 
         console.log(`[Scraper] Images page: ${page.url()}`);
 
-        // Scroll
-        await page.evaluate(async () => {
-            await new Promise((resolve) => {
-                let totalHeight = 0;
-                const timer = setInterval(() => {
-                    const distance = 200 + Math.floor(Math.random() * 400);
-                    window.scrollBy(0, distance);
-                    totalHeight += distance;
-                    if (totalHeight >= document.body.scrollHeight || totalHeight > 5000) {
-                        clearInterval(timer);
-                        resolve();
-                    }
-                }, 100 + Math.floor(Math.random() * 200));
-            });
-        });
-        await randomDelay(500, 1000);
+        // Scroll a few times to load more images
+        for (let i = 0; i < 3; i++) {
+            await page.evaluate(() => window.scrollBy(0, 1500));
+            await randomDelay(800, 1500);
+        }
 
         // Extract image URLs
         const html = await page.content();
