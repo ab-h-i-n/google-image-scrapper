@@ -78,8 +78,12 @@ app.listen(PORT, () => {
 // Graceful shutdown
 process.on('SIGINT', async () => {
     if (browserPool) {
-        console.log('[Server] Closing all browsers...');
-        await Promise.all(browserPool.browsers.map(b => b.close()));
+        console.log('[Server] Shutting down browser...');
+        if (browserPool.shutdown) {
+            await browserPool.shutdown();
+        } else {
+            await Promise.all(browserPool.browsers.map(b => b.close()));
+        }
     }
     process.exit();
 });

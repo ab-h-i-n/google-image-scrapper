@@ -15,6 +15,9 @@
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "puppeteer": "^24.37.3"
+    "proxy-chain": "^2.7.1",
+    "puppeteer": "^24.37.3",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
   }
 }
