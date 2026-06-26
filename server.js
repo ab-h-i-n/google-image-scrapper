@@ -56,7 +56,7 @@ app.get('/api/search', async (req, res) => {
 
   try {
     const entry = browserPool.getNext();
-    const images = await scrapeGoogleImages(entry, q.trim(), maxImages);
+    const images = await scrapeGoogleImages(entry, q.trim(), maxImages, browserPool);
     const responseData = { query: q.trim(), count: images.length, images };
     
     // Set cache
