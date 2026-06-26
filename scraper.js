@@ -203,13 +203,22 @@ async function initBrowser() {
     };
 }
 
+// Keep-alive agents so repeated HEAD validations to the same CDN reuse sockets
+// instead of re-handshaking on every request.
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: VALIDATE_CONCURRENCY });
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: VALIDATE_CONCURRENCY });
+
 /**
- * Check if an image URL is valid via HEAD request.
+ * Check if an image URL is valid via HEAD request. Optional AbortSignal lets the
+ * caller cancel in-flight checks once it already has enough results.
  */
-async function validateImage(url) {
+async function validateImage(url, signal) {
     return new Promise((resolve) => {
-        const client = url.startsWith('https') ? https : http;
-        const req = client.request(url, { method: 'HEAD', timeout: VALIDATE_TIMEOUT_MS }, (res) => {
+        const isHttps = url.startsWith('https');
+        const client = isHttps ? https : http;
+        const opts = { method: 'HEAD', timeout: VALIDATE_TIMEOUT_MS, agent: isHttps ? httpsAgent : httpAgent };
+        if (signal) opts.signal = signal;
+        const req = client.request(url, opts, (res) => {
             resolve(res.statusCode === 200 && res.headers['content-type']?.startsWith('image/'));
         });
         req.on('error', () => resolve(false));
@@ -277,43 +286,38 @@ function extractImageUrls(html) {
 }
 
 /**
- * Run an async fn over items with bounded concurrency, preserving input order.
- */
-async function mapLimit(items, limit, fn) {
-    const results = new Array(items.length);
-    let cursor = 0;
-    async function worker() {
-        while (cursor < items.length) {
-            const idx = cursor++;
-            results[idx] = await fn(items[idx], idx);
-        }
-    }
-    await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-    return results;
-}
-
-/**
- * Validate candidate URLs concurrently and return up to maxImages live ones,
- * preserving Google's relevance order. Overscans so dead links don't starve the
- * result, but bounds concurrency and falls back to remaining candidates if needed.
+ * Validate candidates concurrently and resolve as soon as `maxImages` live images
+ * are confirmed (returned in Google's rank order), aborting the rest. Live CDN
+ * images answer in <400ms, so this avoids blocking on dead/slow URLs that would
+ * otherwise each burn up to VALIDATE_TIMEOUT_MS. Overscans (vs the few we need) so
+ * a low live-rate still fills the result without a second serial wave.
  */
 async function collectValidImages(candidates, maxImages) {
-    const out = [];
-    const overscan = Math.min(candidates.length, Math.max(maxImages * 4, 24));
-    const first = candidates.slice(0, overscan);
-    const verdicts = await mapLimit(first, VALIDATE_CONCURRENCY, validateImage);
-    for (let i = 0; i < first.length && out.length < maxImages; i++) {
-        if (verdicts[i]) out.push(first[i]);
-    }
-    // Rare low-hit-rate fallback: validate the rest only if we still came up short.
-    if (out.length < maxImages && candidates.length > overscan) {
-        const rest = candidates.slice(overscan);
-        const v2 = await mapLimit(rest, VALIDATE_CONCURRENCY, validateImage);
-        for (let i = 0; i < rest.length && out.length < maxImages; i++) {
-            if (v2[i]) out.push(rest[i]);
-        }
-    }
-    return out;
+    if (candidates.length === 0) return [];
+    const cap = Math.min(candidates.length, Math.max(maxImages * 6, 48), 96);
+    const pool = candidates.slice(0, cap);
+    return new Promise((resolve) => {
+        const controllers = [];
+        const live = [];
+        let settled = 0, done = false;
+        const finish = () => {
+            if (done) return;
+            done = true;
+            for (const c of controllers) { try { c.abort(); } catch (e) {} }
+            live.sort((a, b) => a.idx - b.idx);
+            resolve(live.slice(0, maxImages).map(x => x.url));
+        };
+        pool.forEach((url, idx) => {
+            const ac = new AbortController();
+            controllers.push(ac);
+            validateImage(url, ac.signal).then((ok) => {
+                if (done) return;
+                if (ok) live.push({ idx, url });
+                settled++;
+                if (live.length >= maxImages || settled >= pool.length) finish();
+            });
+        });
+    });
 }
 
 /**

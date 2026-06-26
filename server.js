@@ -71,9 +71,13 @@ app.get('/api/search', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`\n🔍 Google Image Scraper running at http://localhost:${PORT}\n`);
 });
+// Keep idle connections open (default keepAliveTimeout is only 5s) so a pooling
+// caller reuses sockets instead of re-handshaking on every request.
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 66000;
 
 // Graceful shutdown
 process.on('SIGINT', async () => {
