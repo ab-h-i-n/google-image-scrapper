@@ -76,8 +76,12 @@ function launchChrome(debugPort, label, proxyUrl) {
         commandArgs = ['--auto-servernum', '--server-args=-screen 0 1920x1080x24', CHROME_PATH, ...args];
     }
 
-    const proc = spawn(command, commandArgs, { stdio: 'ignore', detached: false, env });
+    // detached: true puts Chrome in its own session/process group so it is NOT
+    // killed by SIGHUP when the shell/SSH session that started the server exits.
+    // (Non-detached Chrome dies on session close unless launched by systemd at boot.)
+    const proc = spawn(command, commandArgs, { stdio: 'ignore', detached: true, env });
     proc.on('error', (err) => console.error(`[Scraper] Chrome ${label} error:`, err.message));
+    proc.unref();
     return proc;
 }
 
@@ -190,7 +194,10 @@ async function initBrowser() {
         async shutdown() {
             for (const entry of pool) {
                 try { entry.browser.disconnect(); } catch (e) {}
-                try { entry.chromeProcess.kill(); } catch (e) {}
+                // Chrome is detached (its own process group), so kill the whole
+                // group to avoid leaking renderer/gpu children on restart.
+                try { process.kill(-entry.chromeProcess.pid, 'SIGKILL'); }
+                catch (e) { try { entry.chromeProcess.kill(); } catch (e2) {} }
             }
         },
     };
@@ -313,7 +320,7 @@ async function collectValidImages(candidates, maxImages) {
  * Scrape Google Images for a given query.
  */
 async function scrapeGoogleImages(entry, query, maxImages = 20, pool = null) {
-    const { page } = entry;
+    let page;
     try {
         console.log(`[Scraper] Searching: "${query}" via ${entry.label}`);
 
@@ -323,6 +330,13 @@ async function scrapeGoogleImages(entry, query, maxImages = 20, pool = null) {
             await new Promise(r => setTimeout(r, MIN_ENTRY_SPACING_MS - sinceLast));
         }
         entry.lastUsed = Date.now();
+
+        // Fresh page per request (closed in finally). Reusing one persistent page
+        // across back-to-back navigations detaches its frame ("Attempted to use
+        // detached Frame") and serializes concurrent requests. The browser profile
+        // stays warmed — consent cookies live at the profile level, not the page.
+        page = await entry.browser.newPage();
+        await page.setViewport({ width: 1920, height: 1080 });
 
         await navigateToImageSearch(page, query);
 
@@ -367,6 +381,8 @@ async function scrapeGoogleImages(entry, query, maxImages = 20, pool = null) {
     } catch (error) {
         console.error('[Scraper] Error:', error.message);
         return [];
+    } finally {
+        if (page) { try { await page.close(); } catch (e) {} }
     }
 }
 
