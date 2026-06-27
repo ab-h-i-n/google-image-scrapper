@@ -1,11 +1,10 @@
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
-const { scrapeGoogleImages, initBrowser } = require('./scraper');
+const { scrapeImages } = require('./scraper');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-let browserPool;
 
 app.use(cors());
 app.use(express.json());
@@ -15,27 +14,12 @@ app.use(express.static(path.join(__dirname, 'public')));
 const cache = new Map();
 const CACHE_TTL = 3600 * 1000; // 1 hour
 
-// Initialize browser
-(async () => {
-    try {
-        browserPool = await initBrowser();
-        console.log('[Server] Browser pool initialized successfully.');
-    } catch (err) {
-        console.error('[Server] Failed to initialize browser:', err);
-        process.exit(1);
-    }
-})();
-
 // API endpoint: GET /api/search?q=query&count=20
 app.get('/api/search', async (req, res) => {
   const { q, count } = req.query;
 
   if (!q || !q.trim()) {
     return res.status(400).json({ error: 'Missing required query parameter "q"' });
-  }
-
-  if (!browserPool) {
-      return res.status(503).json({ error: 'Server starting up, please try again in a few seconds.' });
   }
 
   const maxImages = Math.min(parseInt(count) || 20, 50);
@@ -55,15 +39,14 @@ app.get('/api/search', async (req, res) => {
   console.log(`[Server] Search request: "${q}" (max ${maxImages} images)`);
 
   try {
-    const entry = browserPool.getNext();
-    const images = await scrapeGoogleImages(entry, q.trim(), maxImages, browserPool);
+    const images = await scrapeImages(q.trim(), maxImages);
     const responseData = { query: q.trim(), count: images.length, images };
-    
-    // Set cache
+
+    // Set cache (only successful, non-empty results)
     if (images.length > 0) {
         cache.set(cacheKey, { timestamp: Date.now(), data: responseData });
     }
-    
+
     res.json(responseData);
   } catch (err) {
     console.error('[Server] Scrape error:', err.message);
@@ -72,7 +55,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 const server = app.listen(PORT, () => {
-  console.log(`\n🔍 Google Image Scraper running at http://localhost:${PORT}\n`);
+  console.log(`\n🔍 Image Scraper (DuckDuckGo + Bing) running at http://localhost:${PORT}\n`);
 });
 // Keep idle connections open (default keepAliveTimeout is only 5s) so a pooling
 // caller reuses sockets instead of re-handshaking on every request.
@@ -80,14 +63,5 @@ server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
 // Graceful shutdown
-process.on('SIGINT', async () => {
-    if (browserPool) {
-        console.log('[Server] Shutting down browser...');
-        if (browserPool.shutdown) {
-            await browserPool.shutdown();
-        } else {
-            await Promise.all(browserPool.browsers.map(b => b.close()));
-        }
-    }
-    process.exit();
-});
+process.on('SIGINT', () => process.exit());
+process.on('SIGTERM', () => process.exit());

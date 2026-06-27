@@ -1,207 +1,14 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-const { spawn } = require('child_process');
 const https = require('https');
 const http = require('http');
-const path = require('path');
-const os = require('os');
 
-puppeteer.use(StealthPlugin());
+// Browser-like identity for search-engine requests.
+const USER_AGENT = process.env.SCRAPER_UA ||
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36';
 
-const CHROME_PATH = process.env.CHROME_PATH || (
-    process.platform === 'darwin'
-        ? '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
-        : '/usr/bin/google-chrome'
-);
-const BASE_DEBUG_PORT = 9222;
-const PROXY_PORT = parseInt(process.env.PROXY_PORT || '3128');
-const PROXIES = (process.env.PROXY_LIST || '').split(',').map(p => p.trim()).filter(Boolean);
-// If DISPLAY is set (e.g. :99 from Xvfb service), Chrome runs non-headless on that display.
-// Otherwise, use xvfb-run to wrap each Chrome process.
-const HAS_DISPLAY = !!process.env.DISPLAY;
-
-// Per-request performance tuning (all overridable via env).
-// Image validation: fire HEAD requests concurrently with a short timeout instead
-// of long sequential batches — most live images answer in <500ms.
+// Per-request tuning (all overridable via env).
 const VALIDATE_TIMEOUT_MS = parseInt(process.env.VALIDATE_TIMEOUT_MS || '1200');
 const VALIDATE_CONCURRENCY = parseInt(process.env.VALIDATE_CONCURRENCY || '60');
-// Minimum spacing between two consecutive scrapes on the SAME browser/IP. Small,
-// just to avoid hammering one IP under load — not the old multi-second anti-bot tax.
-const MIN_ENTRY_SPACING_MS = parseInt(process.env.MIN_ENTRY_SPACING_MS || '300');
-// When an entry hits a CAPTCHA, sideline it for this long and fail over to another
-// IP instead of sleeping inline.
-const CAPTCHA_COOLDOWN_MS = parseInt(process.env.CAPTCHA_COOLDOWN_MS || '300000'); // 5 min
-
-function randomDelay(min = 1000, max = 3000) {
-    return new Promise(r => setTimeout(r, min + Math.random() * (max - min)));
-}
-
-/**
- * Launch a Chrome process with optional proxy support.
- * Each instance gets its own debug port and user data dir.
- */
-function launchChrome(debugPort, label, proxyUrl) {
-    const userDataDir = path.join(os.homedir(), `.chrome-scraper-${label}`);
-    const args = [
-        `--remote-debugging-port=${debugPort}`,
-        '--no-first-run',
-        '--no-default-browser-check',
-        `--user-data-dir=${userDataDir}`,
-        '--disable-background-networking',
-        '--disable-default-apps',
-        '--disable-extensions',
-        '--disable-sync',
-        '--disable-translate',
-        '--metrics-recording-only',
-        '--no-sandbox',
-        '--window-size=1920,1080',
-        'about:blank',
-    ];
-
-    if (proxyUrl) {
-        args.splice(-1, 0, `--proxy-server=${proxyUrl}`);
-    }
-
-    // Use virtual display instead of --headless (Google detects headless mode).
-    // - Linux with a DISPLAY already set (Xvfb service) → launch Chrome directly.
-    // - Headless Linux (e.g. EC2) → wrap with xvfb-run for a virtual display.
-    // - Desktop OS (macOS/Windows) → launch directly; the OS provides a display.
-    const env = { ...process.env };
-    let command, commandArgs;
-    if (HAS_DISPLAY || process.platform !== 'linux') {
-        command = CHROME_PATH;
-        commandArgs = args;
-    } else {
-        command = 'xvfb-run';
-        commandArgs = ['--auto-servernum', '--server-args=-screen 0 1920x1080x24', CHROME_PATH, ...args];
-    }
-
-    // detached: true puts Chrome in its own session/process group so it is NOT
-    // killed by SIGHUP when the shell/SSH session that started the server exits.
-    // (Non-detached Chrome dies on session close unless launched by systemd at boot.)
-    const proc = spawn(command, commandArgs, { stdio: 'ignore', detached: true, env });
-    proc.on('error', (err) => console.error(`[Scraper] Chrome ${label} error:`, err.message));
-    proc.unref();
-    return proc;
-}
-
-/**
- * Wait for a Chrome debug port to become available.
- */
-async function waitForPort(port, maxWait = 15000) {
-    const start = Date.now();
-    while (Date.now() - start < maxWait) {
-        try {
-            const resp = await fetch(`http://localhost:${port}/json/version`);
-            if (resp.ok) return true;
-        } catch (e) {}
-        await new Promise(r => setTimeout(r, 500));
-    }
-    throw new Error(`Chrome on port ${port} did not start in time`);
-}
-
-/**
- * Create a browser entry: launch Chrome, connect Puppeteer, warm up.
- */
-async function createEntry(debugPort, label, proxyUrl) {
-    console.log(`[Scraper] Launching Chrome: ${label} (port ${debugPort})${proxyUrl ? ` via proxy ${proxyUrl}` : ''}...`);
-    const chromeProcess = launchChrome(debugPort, label, proxyUrl);
-    await waitForPort(debugPort);
-
-    const browser = await puppeteer.connect({
-        browserURL: `http://localhost:${debugPort}`,
-        defaultViewport: null,
-        protocolTimeout: 120000,
-    });
-
-    let pages = await browser.pages();
-    let page = pages[0] || await browser.newPage();
-    await page.setViewport({ width: 1920, height: 1080 });
-
-    // Warm up
-    console.log(`[Scraper] Warming up ${label}...`);
-    await page.goto('https://www.google.com/', { waitUntil: 'networkidle2', timeout: 20000 });
-    await randomDelay(1000, 2000);
-
-    // Accept consent if present
-    try {
-        const btn = await page.$('button[aria-label="Accept all"], button#L2AGLb');
-        if (btn) { await btn.click(); await randomDelay(500, 1000); }
-    } catch (e) {}
-
-    console.log(`[Scraper] ${label} ready`);
-    return { browser, page, label, chromeProcess, debugPort, captchaCount: 0, lastUsed: 0, cooldownUntil: 0 };
-}
-
-/**
- * Initialize browser pool: one direct + one per proxy.
- */
-async function initBrowser() {
-    const pool = [];
-    let portOffset = 0;
-
-    // Direct browser (no proxy, uses EC2's own IP)
-    try {
-        pool.push(await createEntry(BASE_DEBUG_PORT + portOffset, 'direct', null));
-        portOffset++;
-    } catch (err) {
-        console.error('[Scraper] Failed to launch direct browser:', err.message);
-    }
-
-    // One browser per proxy
-    for (const proxy of PROXIES) {
-        try {
-            const proxyUrl = proxy.includes(':') ? `http://${proxy}` : `http://${proxy}:${PROXY_PORT}`;
-            pool.push(await createEntry(BASE_DEBUG_PORT + portOffset, `proxy-${proxy}`, proxyUrl));
-            portOffset++;
-        } catch (err) {
-            console.error(`[Scraper] Failed to launch browser for proxy ${proxy}:`, err.message);
-        }
-    }
-
-    if (pool.length === 0) throw new Error('No browsers launched');
-    console.log(`[Scraper] Pool ready: ${pool.length} browser(s)`);
-
-    let index = 0;
-    return {
-        browsers: pool.map(p => p.browser),
-
-        getNext(excludeLabel = null) {
-            // Prefer entries that are not on CAPTCHA cooldown and have the lowest
-            // captchaCount, breaking ties by round-robin. Optionally skip one label
-            // (used for fail-over to a different IP).
-            const now = Date.now();
-            let best = null;
-            for (let i = 0; i < pool.length; i++) {
-                const candidate = pool[(index + i) % pool.length];
-                if (excludeLabel && candidate.label === excludeLabel) continue;
-                if (candidate.cooldownUntil > now) continue;
-                if (!best || candidate.captchaCount < best.captchaCount) {
-                    best = candidate;
-                }
-            }
-            // Fallback: everything excluded or cooling down — pick the soonest-available.
-            if (!best) {
-                const usable = pool.filter(c => !excludeLabel || c.label !== excludeLabel);
-                const arr = usable.length ? usable : pool;
-                best = arr.reduce((a, b) => (a.cooldownUntil <= b.cooldownUntil ? a : b));
-            }
-            index++;
-            console.log(`[Scraper] Using: ${best.label} (captchas: ${best.captchaCount})`);
-            return best;
-        },
-
-        async shutdown() {
-            for (const entry of pool) {
-                try { entry.browser.disconnect(); } catch (e) {}
-                // Chrome is detached (its own process group), so kill the whole
-                // group to avoid leaking renderer/gpu children on restart.
-                try { process.kill(-entry.chromeProcess.pid, 'SIGKILL'); }
-                catch (e) { try { entry.chromeProcess.kill(); } catch (e2) {} }
-            }
-        },
-    };
-}
+const FETCH_TIMEOUT_MS = parseInt(process.env.FETCH_TIMEOUT_MS || '12000');
 
 // Keep-alive agents so repeated HEAD validations to the same CDN reuse sockets
 // instead of re-handshaking on every request.
@@ -209,18 +16,95 @@ const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: VALIDATE_CONCU
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: VALIDATE_CONCURRENCY });
 
 /**
+ * Fetch a URL's body as text with browser-like headers. Uses the global `fetch`
+ * (Node 18+), which transparently follows redirects and decodes gzip/brotli.
+ */
+async function fetchText(url, extraHeaders = {}) {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), FETCH_TIMEOUT_MS);
+    try {
+        const res = await fetch(url, {
+            redirect: 'follow',
+            signal: ac.signal,
+            headers: {
+                'User-Agent': USER_AGENT,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                ...extraHeaders,
+            },
+        });
+        return await res.text();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+/**
+ * DuckDuckGo image search (primary source). Two-step: fetch the page to mint a
+ * per-query `vqd` token, then hit the i.js JSON API. Returns full-resolution
+ * candidate image URLs in DDG's relevance order. No browser / no CAPTCHA wall.
+ */
+async function scrapeDuckDuckGo(query) {
+    const q = encodeURIComponent(query);
+
+    // 1) Mint the per-query vqd token from the results page.
+    const tokenHtml = await fetchText(`https://duckduckgo.com/?q=${q}&iar=images&iax=images&ia=images`);
+    const m = tokenHtml.match(/vqd=["']?([\d-]+)["']?/);
+    if (!m) throw new Error('vqd token not found');
+    const vqd = m[1];
+
+    // 2) Fetch the image results JSON.
+    const body = await fetchText(
+        `https://duckduckgo.com/i.js?l=us-en&o=json&q=${q}&vqd=${vqd}&f=,,,&p=1`,
+        {
+            'Referer': 'https://duckduckgo.com/',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With': 'XMLHttpRequest',
+        },
+    );
+    let data;
+    try { data = JSON.parse(body); } catch (e) { throw new Error('DDG JSON parse failed'); }
+    const results = Array.isArray(data.results) ? data.results : [];
+    const urls = results.map(r => r.image).filter(u => typeof u === 'string' && u.startsWith('http'));
+    return Array.from(new Set(urls));
+}
+
+/**
+ * Bing image search (fallback source). Full-resolution URLs live in the `murl`
+ * field of each result's HTML-entity-encoded `m="{...}"` attribute.
+ */
+async function scrapeBing(query) {
+    const q = encodeURIComponent(query);
+    const html = await fetchText(`https://www.bing.com/images/search?q=${q}&form=HDRSC2&first=1`);
+    const set = new Set();
+    const re = /murl&quot;:&quot;(.*?)&quot;/g;
+    let m;
+    while ((m = re.exec(html)) !== null) {
+        const url = m[1].replace(/&amp;/g, '&');
+        if (url.startsWith('http')) set.add(url);
+    }
+    return Array.from(set);
+}
+
+/**
  * Check if an image URL is valid via HEAD request. Optional AbortSignal lets the
- * caller cancel in-flight checks once it already has enough results.
+ * caller cancel in-flight checks once it already has enough results. Third-party
+ * URLs may be malformed, so the request construction is guarded.
  */
 async function validateImage(url, signal) {
     return new Promise((resolve) => {
-        const isHttps = url.startsWith('https');
-        const client = isHttps ? https : http;
-        const opts = { method: 'HEAD', timeout: VALIDATE_TIMEOUT_MS, agent: isHttps ? httpsAgent : httpAgent };
-        if (signal) opts.signal = signal;
-        const req = client.request(url, opts, (res) => {
-            resolve(res.statusCode === 200 && res.headers['content-type']?.startsWith('image/'));
-        });
+        let req;
+        try {
+            const isHttps = url.startsWith('https');
+            const client = isHttps ? https : http;
+            const opts = { method: 'HEAD', timeout: VALIDATE_TIMEOUT_MS, agent: isHttps ? httpsAgent : httpAgent };
+            if (signal) opts.signal = signal;
+            req = client.request(url, opts, (res) => {
+                resolve(res.statusCode === 200 && res.headers['content-type']?.startsWith('image/'));
+            });
+        } catch (e) {
+            return resolve(false);
+        }
         req.on('error', () => resolve(false));
         req.on('timeout', () => { req.destroy(); resolve(false); });
         req.end();
@@ -228,66 +112,8 @@ async function validateImage(url, signal) {
 }
 
 /**
- * Detect CAPTCHA page.
- */
-async function isCaptchaPage(page, html = null) {
-    if (page.url().includes('/sorry/')) return true;
-    const content = html != null ? html : await page.content();
-    return content.includes('detected unusual traffic') || content.includes('systems have detected');
-}
-
-/**
- * Type text with human-like delays.
- */
-async function humanType(page, selector, text) {
-    await page.click(selector);
-    await randomDelay(200, 400);
-    for (const char of text) {
-        await page.keyboard.type(char, { delay: 50 + Math.random() * 120 });
-    }
-}
-
-/**
- * Navigate to Google Images search.
- * Uses direct URL navigation (proven to work without CAPTCHA when Chrome
- * is spawned natively with Xvfb).
- */
-async function navigateToImageSearch(page, query) {
-    const searchUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=2`;
-    await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
-}
-
-/**
- * Extract candidate image URLs from a Google Images results HTML blob.
- */
-function extractImageUrls(html) {
-    const regex = /(?:https?:\/\/|https?:\\\/\\\/)[^"'\s\\]+\.(?:jpg|jpeg|png|gif|webp)/gi;
-    const set = new Set();
-    let match;
-    while ((match = regex.exec(html)) !== null) {
-        let url = match[0];
-        try { url = JSON.parse(`"${url}"`); } catch (e) {
-            url = url.replace(/\\u003d/g, '=').replace(/\\u0026/g, '&').replace(/\\u002f/g, '/');
-        }
-        url = url.replace(/\\\//g, '/');
-
-        if (
-            url.startsWith('http') &&
-            !url.includes('google.com') &&
-            !url.includes('gstatic.com') &&
-            !url.includes('googleapis.com') &&
-            !url.includes('favicon') &&
-            !url.includes('logo')
-        ) {
-            set.add(url);
-        }
-    }
-    return Array.from(set);
-}
-
-/**
  * Validate candidates concurrently and resolve as soon as `maxImages` live images
- * are confirmed (returned in Google's rank order), aborting the rest. Live CDN
+ * are confirmed (returned in source rank order), aborting the rest. Live CDN
  * images answer in <400ms, so this avoids blocking on dead/slow URLs that would
  * otherwise each burn up to VALIDATE_TIMEOUT_MS. Overscans (vs the few we need) so
  * a low live-rate still fills the result without a second serial wave.
@@ -321,94 +147,41 @@ async function collectValidImages(candidates, maxImages) {
 }
 
 /**
- * Scrape Google Images for a given query.
+ * Scrape images for a query: DuckDuckGo first, Bing as fallback. Returns up to
+ * `maxImages` validated, live image URLs in source-relevance order.
  */
-async function scrapeGoogleImages(entry, query, maxImages = 20, pool = null) {
-    let page;
-    try {
-        console.log(`[Scraper] Searching: "${query}" via ${entry.label}`);
-
-        // Light politeness: only pause if this same entry was used very recently.
-        const sinceLast = Date.now() - (entry.lastUsed || 0);
-        if (sinceLast < MIN_ENTRY_SPACING_MS) {
-            await new Promise(r => setTimeout(r, MIN_ENTRY_SPACING_MS - sinceLast));
+async function scrapeImages(query, maxImages = 20) {
+    const sources = [
+        { name: 'duckduckgo', fn: scrapeDuckDuckGo },
+        { name: 'bing', fn: scrapeBing },
+    ];
+    for (const src of sources) {
+        try {
+            const candidates = await src.fn(query);
+            console.log(`[Scraper] ${src.name}: ${candidates.length} candidates for "${query}"`);
+            if (!candidates.length) continue;
+            const valid = await collectValidImages(candidates, maxImages);
+            console.log(`[Scraper] ${src.name}: ${valid.length} validated`);
+            if (valid.length) return valid;
+        } catch (e) {
+            console.error(`[Scraper] ${src.name} failed: ${e.message}`);
         }
-        entry.lastUsed = Date.now();
-
-        // Fresh page per request (closed in finally). Reusing one persistent page
-        // across back-to-back navigations detaches its frame ("Attempted to use
-        // detached Frame") and serializes concurrent requests. The browser profile
-        // stays warmed — consent cookies live at the profile level, not the page.
-        page = await entry.browser.newPage();
-        await page.setViewport({ width: 1920, height: 1080 });
-
-        await navigateToImageSearch(page, query);
-
-        // Single page.content() serves both CAPTCHA detection and URL extraction.
-        let html = await page.content();
-
-        if (await isCaptchaPage(page, html)) {
-            console.warn(`[Scraper] CAPTCHA on ${entry.label} — cooling down ${Math.round(CAPTCHA_COOLDOWN_MS / 1000)}s`);
-            entry.captchaCount++;
-            entry.cooldownUntil = Date.now() + CAPTCHA_COOLDOWN_MS;
-
-            // Fail over to a different IP immediately instead of sleeping inline.
-            if (pool) {
-                const alt = pool.getNext(entry.label);
-                if (alt && alt.label !== entry.label) {
-                    console.log(`[Scraper] Failing over to ${alt.label}`);
-                    return scrapeGoogleImages(alt, query, maxImages, null);
-                }
-            }
-            return [];
-        }
-
-        console.log(`[Scraper] Images page: ${page.url()}`);
-
-        let candidates = extractImageUrls(html);
-
-        // Only scroll for more if the first paint didn't yield enough candidates.
-        if (candidates.length < maxImages * 2) {
-            for (let i = 0; i < 3 && candidates.length < maxImages * 2; i++) {
-                await page.evaluate(() => window.scrollBy(0, 2000));
-                await new Promise(r => setTimeout(r, 350)); // brief wait for lazy-load
-                html = await page.content();
-                candidates = extractImageUrls(html);
-            }
-        }
-
-        console.log(`[Scraper] ${candidates.length} candidates. Validating...`);
-        const verifiedUrls = await collectValidImages(candidates, maxImages);
-        console.log(`[Scraper] Validated ${verifiedUrls.length} images.`);
-        return verifiedUrls;
-
-    } catch (error) {
-        console.error('[Scraper] Error:', error.message);
-        return [];
-    } finally {
-        if (page) { try { await page.close(); } catch (e) {} }
     }
+    return [];
 }
 
-// CLI usage
+// CLI usage: node scraper.js <query> [count]
 if (require.main === module) {
     (async () => {
         const query = process.argv[2];
         if (!query) {
-            console.error('Usage: node scraper.js <query>');
+            console.error('Usage: node scraper.js <query> [count]');
             process.exit(1);
         }
         const count = parseInt(process.argv[3]) || 20;
-
-        const pool = await initBrowser();
-        try {
-            const entry = pool.getNext();
-            const urls = await scrapeGoogleImages(entry, query, count, pool);
-            console.log(JSON.stringify(urls, null, 2));
-        } finally {
-            await pool.shutdown();
-        }
+        const urls = await scrapeImages(query, count);
+        console.log(JSON.stringify(urls, null, 2));
     })();
 }
 
-module.exports = { initBrowser, scrapeGoogleImages };
+module.exports = { scrapeImages };
